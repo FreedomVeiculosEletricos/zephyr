@@ -10,7 +10,7 @@
 		compatible = "zephyr,morse-code";
 
 		speed = <20>;
-		gpios = <&pioa 23 GPIO_ACTIVE_LOW>;
+		pwms = <&pwm0 0 PWM_MSEC(20) PWM_POLARITY_INVERTED>;
 		timer-unit = <&tc1>;
 	};
 };
