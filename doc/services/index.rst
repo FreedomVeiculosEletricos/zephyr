@@ -27,6 +27,7 @@ OS Services
    mem_mgmt/index.rst
    net_buf/index.rst
    modem/index.rst
+   morse/index.rst
    notify.rst
    pm/index.rst
    portability/index.rst
