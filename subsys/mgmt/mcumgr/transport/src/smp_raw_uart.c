@@ -30,6 +30,9 @@ BUILD_ASSERT(CONFIG_MCUMGR_TRANSPORT_RAW_UART_INPUT_TIMEOUT_TIME_MS != 0,
 	     "CONFIG_MCUMGR_TRANSPORT_RAW_UART_INPUT_TIMEOUT_TIME_MS must be > 0");
 #endif
 
+static const struct device *const uart_mcumgr_dev =
+	DEVICE_DT_GET(DT_CHOSEN(zephyr_uart_mcumgr));
+
 static struct mcumgr_serial_rx_ctxt mcumgr_raw_uart_rx_ctxt = {
 #if defined(CONFIG_MCUMGR_TRANSPORT_SERIAL_HAS_SMP_OVER_CONSOLE) && \
 	defined(CONFIG_MCUMGR_TRANSPORT_SERIAL_HAS_RAW_BINARY_NON_SMP_OVER_CONSOLE)
@@ -124,7 +127,7 @@ static int smp_raw_uart_tx_pkt(struct net_buf *nb)
 {
 	int rc;
 
-	rc = uart_mcumgr_send(nb->data, nb->len);
+	rc = uart_mcumgr_send(uart_mcumgr_dev, nb->data, nb->len);
 	smp_packet_free(nb);
 
 	return rc;
@@ -226,7 +229,7 @@ static int smp_raw_uart_init(void)
 	rc = smp_transport_init(&smp_raw_uart_transport);
 
 	if (rc == 0) {
-		uart_mcumgr_register(smp_raw_uart_process_frag);
+		uart_mcumgr_register(uart_mcumgr_dev, smp_raw_uart_process_frag);
 #if defined(CONFIG_SMP_CLIENT) || defined(CONFIG_MCUMGR_GRP_TRANSPORT)
 		smp_client_transport_register(&smp_raw_uart_client_transport);
 #endif
