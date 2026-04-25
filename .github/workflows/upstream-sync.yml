@@ -1,0 +1,153 @@
+# SPDX-License-Identifier: Apache-2.0
+
+name: Upstream Sync
+
+on:
+  schedule:
+    - cron: '0 3 * * *'   # 03:00 UTC nightly
+  workflow_dispatch:
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Sync main + rebase main-next
+    runs-on: ubuntu-24.04
+    if: github.repository == 'FreedomVeiculosEletricos/zephyr'
+    permissions:
+      contents: write
+      issues: write
+
+    steps:
+      - name: Checkout fork/main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          # NOTE: if branch protection is ever enabled on main or main-next
+          # (requiring PRs), replace GITHUB_TOKEN with secrets.SYNC_PAT here
+          # and in every git push step below.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+
+      - name: Add upstream remote and fetch
+        run: |
+          git remote add upstream https://github.com/zephyrproject-rtos/zephyr.git
+          git fetch upstream main
+          git fetch origin main main-next || git fetch origin main
+
+      - name: Fast-forward fork/main to upstream/main
+        run: |
+          UPSTREAM_SHA=$(git rev-parse upstream/main)
+          FORK_MAIN_SHA=$(git rev-parse origin/main)
+
+          if [ "$UPSTREAM_SHA" = "$FORK_MAIN_SHA" ]; then
+            echo "fork/main is already up to date. Nothing to do."
+            exit 0
+          fi
+
+          if ! git merge-base --is-ancestor "$FORK_MAIN_SHA" "$UPSTREAM_SHA"; then
+            echo "::error ::Fast-forward is impossible: upstream/main and fork/main have diverged."
+            echo "::error ::upstream/main: $UPSTREAM_SHA  fork/main: $FORK_MAIN_SHA"
+            exit 1
+          fi
+
+          git checkout main
+          git merge --ff-only upstream/main
+          git push origin main
+          echo "fork/main synced to upstream/main ($UPSTREAM_SHA)"
+
+      - name: Rebase main-next onto main
+        id: rebase
+        run: |
+          git fetch origin main-next
+          git checkout main-next
+          git reset --hard origin/main-next
+
+          if git rebase origin/main; then
+            echo "rebase_status=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "rebase_status=failure" >> "$GITHUB_OUTPUT"
+            git rebase --abort
+          fi
+
+      - name: Force-push main-next (success)
+        if: steps.rebase.outputs.rebase_status == 'success'
+        run: git push --force-with-lease origin main-next
+
+      - name: Close sync-failure issue (success)
+        if: steps.rebase.outputs.rebase_status == 'success'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'upstream-sync-failure', per_page: 10,
+            });
+            for (const issue of issues) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `### Sync recovered\n\nRebase succeeded in run [${context.runNumber}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) on ${new Date().toISOString().split('T')[0]}. Closing automatically.`,
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: issue.number, state: 'closed',
+              });
+            }
+
+      - name: Open or update sync-failure issue (failure)
+        if: steps.rebase.outputs.rebase_status == 'failure'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const today = new Date().toISOString().split('T')[0];
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'upstream-sync-failure', per_page: 10,
+            });
+            if (issues.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title: `Upstream sync failure: main-next rebase conflict (${today})`,
+                labels: ['upstream-sync-failure'],
+                body: [
+                  '## Upstream Sync Failure',
+                  '',
+                  `Rebase of \`main-next\` onto \`main\` **failed** on ${today}.`,
+                  `**Workflow run:** [${context.runNumber}](${runUrl})`,
+                  '',
+                  '### How to fix',
+                  '1. `git fetch origin main`',
+                  '2. `git checkout main-next && git rebase origin/main`',
+                  '3. Resolve conflicts, then `git rebase --continue`',
+                  '4. `git push --force-with-lease origin main-next`',
+                  '',
+                  'This issue closes automatically on the next successful sync.',
+                ].join('\n'),
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: issues[0].number,
+                body: `### Still failing — ${today}\n\nRun [${context.runNumber}](${runUrl}) also failed. Conflict unresolved.`,
+              });
+            }
+
+      - name: Fail job on rebase failure
+        if: steps.rebase.outputs.rebase_status == 'failure'
+        run: |
+          echo "::error ::Rebase of main-next onto main failed. See the upstream-sync-failure issue."
+          exit 1
