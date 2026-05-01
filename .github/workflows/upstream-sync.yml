@@ -29,10 +29,12 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-          # NOTE: if branch protection is ever enabled on main or main-next
-          # (requiring PRs), replace GITHUB_TOKEN with secrets.SYNC_PAT here
-          # and in every git push step below.
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # Use an SSH deploy key (with write access) so pushes that
+          # include upstream changes to .github/workflows/* are accepted.
+          # The default GITHUB_TOKEN is a GitHub App token and is hard-
+          # blocked from creating or updating workflow files; deploy keys
+          # are not subject to that restriction.
+          ssh-key: ${{ secrets.SYNC_SSH_KEY }}
 
       - name: Configure git identity
         run: |
