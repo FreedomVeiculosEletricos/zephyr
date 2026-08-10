@@ -108,6 +108,21 @@ int smp_process_request_packet(struct smp_streamer *streamer, void *req);
 
 #if defined(CONFIG_MCUMGR_TRANSPORT_FORWARD_TREE)
 int smp_ft_process_request_packet(struct smp_streamer *streamer, void *vreq);
+
+/**
+ * @brief Application hook: a frame is about to go out to a downstream transport.
+ *
+ * Called for every frame this node forwards downstream, before the transport
+ * takes it. Purely observational - it is how an application learns that a
+ * downstream link is carrying host traffic, so that something originated locally
+ * (a keepalive, say) can keep off a half-duplex wire that is already busy.
+ *
+ * Runs on the MCUmgr transport work queue.
+ *
+ * @param group	Management group id, host-endian.
+ * @param nb	The frame, still owned by the caller. Do not modify or free it.
+ */
+void smp_ft_downstream_forwarded(uint16_t group, struct net_buf *nb);
 #endif
 
 /**

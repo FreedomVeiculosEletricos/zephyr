@@ -21,12 +21,29 @@
 
 #include <mgmt/mcumgr/transport/smp_internal.h>
 
+#include <zephyr/toolchain.h>
+
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(mcumgr_forward, 4);
 
 #define SMP_FORWARD_TREE_PORT_MASK 0x0f
 #define SMP_FORWARD_TREE_PORT_BITS 0x04
 #define SMP_FORWARD_TREE_MAX_PORTS 0x10
+
+/*
+ * Application hook. The default is inert; an application may override it with a
+ * strong definition.
+ */
+
+/* Called for every frame this node forwards to a downstream transport, before
+ * the transport takes it. Observational only - it exists so an application can
+ * see that a downstream link is busy with host traffic. @p group is host-endian.
+ */
+__weak void smp_ft_downstream_forwarded(uint16_t group, struct net_buf *nb)
+{
+	ARG_UNUSED(group);
+	ARG_UNUSED(nb);
+}
 
 #define DT_SMP_FORWARD_INST		DT_INST(0, zephyr_smpmgr_forward)
 #define DT_SMP_UPSTREAM			DT_PHANDLE(DT_SMP_FORWARD_INST, upstream)
@@ -211,6 +228,10 @@ int smp_ft_process_request_packet(struct smp_streamer *streamer, void *vreq)
 
 			if (req_fwd.hop > 0) {
 				LOG_ERR("forward downstream");
+				/* Before the transport takes the buffer, which
+				 * consumes it either way.
+				 */
+				smp_ft_downstream_forwarded(req_hdr.nh_group, req);
 				rc = smp_ft_forward_downstream(&req_fwd, vreq);
 				consumed = true;
 				break;
