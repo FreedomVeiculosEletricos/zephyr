@@ -369,6 +369,19 @@ static int smp_ft_process_upward(struct smp_streamer *streamer, struct net_buf *
 	 */
 	if (req_hdr->nh_flags & SMP_HDR_FLAG_FT_NODE_ORIGIN) {
 		LOG_DBG("locally originated frame is home");
+
+		if (!IS_ENABLED(CONFIG_SMP_CLIENT) &&
+		    (req_hdr->nh_op == MGMT_OP_READ_RSP ||
+		     req_hdr->nh_op == MGMT_OP_WRITE_RSP)) {
+			/* Nothing in this image is waiting for the answer, and
+			 * the local SMP layer would reply to a response it has
+			 * no client for by sending an error back down to the
+			 * device that answered. Drop it instead.
+			 */
+			LOG_DBG("no SMP client to take the response, dropping");
+			return 0;
+		}
+
 		smp_ft_strip_trailer(req, clone, req_hdr);
 		return smp_ft_process_local(streamer, req, consumed);
 	}
