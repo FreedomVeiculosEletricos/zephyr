@@ -96,17 +96,72 @@ static int smp_ft_read_fwd(const struct net_buf_simple *nb,
 	return 0;
 }
 
+/* Write the trailer back to the end of the frame. smp_ft_read_fwd() read it with
+ * sys_be64_to_cpu(), so it goes back big-endian.
+ */
+static void smp_ft_write_fwd(struct net_buf *nb, const struct smp_forward_tree *fwd)
+{
+	uint64_t tmp_ft;
+
+	memcpy(&tmp_ft, fwd, sizeof(uint64_t));
+	tmp_ft = sys_cpu_to_be64(tmp_ft);
+	memcpy(nb->data + (nb->len - sizeof(uint64_t)), &tmp_ft, sizeof(uint64_t));
+}
+
+/* The port at a given position along the path. Position 0 is the last hop, the one
+ * nearest the destination; the path is not consumed as the frame travels, which is
+ * what lets the trailer serve as a return address.
+ */
+static uint8_t smp_ft_path_port(const struct smp_forward_tree *fwd, uint8_t index)
+{
+	return (fwd->port >> (index * SMP_FORWARD_TREE_PORT_BITS)) & SMP_FORWARD_TREE_PORT_MASK;
+}
+
+/* Which downstream port a frame arrived on, or -1 for anything else (the upstream
+ * transport, or a transport this node does not forward for).
+ */
+static int smp_ft_port_of(const struct device *dev)
+{
+	for (int i = 0; i < ARRAY_SIZE(downstream_transport); ++i) {
+		if (downstream_transport[i].dev == dev) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+/* Take the routing trailer off a frame that has reached its destination and clear
+ * the routing flags, leaving a plain SMP frame for local processing.
+ */
+static void smp_ft_strip_trailer(struct net_buf *req, struct net_buf_simple *clone,
+				 struct smp_hdr *req_hdr)
+{
+	net_buf_simple_remove_mem(clone, sizeof(struct smp_forward_tree));
+
+	req_hdr->nh_flags &= ~SMP_HDR_FLAG_ROUTING_MASK;
+	req_hdr->nh_len -= sizeof(struct smp_forward_tree);
+
+	/* Back to big-endian for the wire/buffer. */
+	req_hdr->nh_len = sys_cpu_to_be16(req_hdr->nh_len);
+	req_hdr->nh_group = sys_cpu_to_be16(req_hdr->nh_group);
+
+	net_buf_simple_push_mem(clone, req_hdr, sizeof(struct smp_hdr));
+
+	/* Sync the modified length back to the original buffer. */
+	req->len = clone->len;
+}
+
 int smp_ft_forward_downstream(struct smp_forward_tree *req_fwd, void *vreq)
 {
-	uint32_t shift = (req_fwd->hop - 1) * SMP_FORWARD_TREE_PORT_BITS;
-	uint8_t port = (req_fwd->port >> shift) & SMP_FORWARD_TREE_PORT_MASK;
+	uint8_t port = smp_ft_path_port(req_fwd, req_fwd->hop - 1);
 	struct smp_transport *smpt = NULL;
 
 	LOG_DBG("port: %d", port);
 
 	if (port >= SMP_FORWARD_TREE_MAX_PORTS
-	||  port > ARRAY_SIZE(downstream_transport)) {
-		LOG_ERR("Invalid transport index [%d]", port);
+	||  port >= ARRAY_SIZE(downstream_transport)) {
+		LOG_ERR("No downstream port [%d] on this node", port);
 		smp_packet_free(vreq);
 		return MGMT_ERR_EINVAL;
 	}
@@ -122,62 +177,204 @@ int smp_ft_forward_downstream(struct smp_forward_tree *req_fwd, void *vreq)
 		return MGMT_ERR_EINVAL;
 	}
 
-	--req_fwd->hop;
-
-	/* Write updated forward tree back to the packet buffer.
-	 * smp_ft_read_fwd() read it with sys_be64_to_cpu(), so we
-	 * must convert back to big-endian before storing.
+	/* One hop spent, one hop to retrace. Their sum is the path length and does
+	 * not change; the path itself is left alone.
 	 */
-	struct net_buf *nb = vreq;
-	uint64_t tmp_ft;
+	--req_fwd->hop;
+	++req_fwd->up;
 
-	memcpy(&tmp_ft, req_fwd, sizeof(uint64_t));
-	tmp_ft = sys_cpu_to_be64(tmp_ft);
-	memcpy(nb->data + (nb->len - sizeof(uint64_t)),
-	       &tmp_ft, sizeof(uint64_t));
+	smp_ft_write_fwd(vreq, req_fwd);
 
 	return smpt->functions.output(smpt->dev, vreq);
 }
 
-/**
- * Intercept all SMP requests in an incoming packet. Each intercepted requests
- * is evaluated sequentially looking in the header to detect the forward tree
- * bit. When the Forward Tree bit is set the data length contains 8 additional
- * bytes at end of the package. The Forward Tree evaluate the protocol counter
- * to detected if the value is 0. When the value is zero the package is send to
- * the mgmt/smp.c to process the content locally (final destination). If the
- * counter is greater the zero the content is forwarded to the correspondent
- * port number. If the port does not exists the package is dropped and an error
- * is returned.
+/* Hand a frame that has arrived at its destination to the local SMP layer.
  *
- * If a request elicits an error response, processing of the packet is aborted.
+ * Consumes the buffer only on success; on error it is left to the caller, which
+ * is what the common cleanup at the end of smp_ft_process_request_packet() is
+ * for. A response frame ends up in smp_client_single_response() from there, so a
+ * node that originated a request needs no callback of its own to get the answer.
+ */
+static int smp_ft_process_local(struct smp_streamer *streamer, struct net_buf *req,
+				bool *consumed)
+{
+	int rc = smp_process_request_packet(streamer, req);
+
+	if (rc == 0) {
+		*consumed = true;
+	}
+
+	return rc;
+}
+
+/* Rules for a frame that arrived from the upstream transport: it is travelling
+ * away from the host, and either this node is on its way or it is the addressee.
+ */
+static int smp_ft_process_downward(struct smp_streamer *streamer, struct net_buf *req,
+				   struct net_buf_simple *clone, struct smp_hdr *req_hdr,
+				   bool *consumed)
+{
+	struct smp_forward_tree req_fwd = { 0 };
+
+	if ((req_hdr->nh_flags & SMP_HDR_FLAG_FORWARD_TREE) == 0) {
+		/* Not routed at all: the host is talking to this node directly. */
+		return smp_ft_process_local(streamer, req, consumed);
+	}
+
+	if (smp_ft_read_fwd(clone, &req_fwd)) {
+		LOG_ERR("Frame is flagged as routed but carries no trailer");
+		return MGMT_ERR_ECORRUPT;
+	}
+
+	LOG_DBG("hop: %u, up: %u", req_fwd.hop, req_fwd.up);
+
+	if (req_fwd.hop + req_fwd.up > SMP_FORWARD_TREE_MAX_HOPS) {
+		LOG_ERR("Path of %u hops is longer than this trailer can address",
+			req_fwd.hop + req_fwd.up);
+		return MGMT_ERR_EINVAL;
+	}
+
+	if (req_fwd.hop > 0) {
+		LOG_DBG("forward downstream");
+		/* Before the transport takes the buffer, which consumes it either
+		 * way.
+		 */
+		smp_ft_downstream_forwarded(req_hdr->nh_group, req);
+		*consumed = true;
+		return smp_ft_forward_downstream(&req_fwd, req);
+	}
+
+	/* This node is the addressee. Whether the trailer stays on depends on who
+	 * has to route the response, and `up` is what says so: with `up` at zero
+	 * nobody forwarded this frame, so the peer is the host and the response
+	 * must look exactly like it always has. With `up` above zero the response
+	 * has to climb back through the nodes that forwarded the request, and the
+	 * trailer left in place is the address it climbs by - echoed back by
+	 * smp.c under CONFIG_MCUMGR_SMP_ROUTING_TRAILER_ECHO, the same way a leaf
+	 * does it.
+	 */
+	if (req_fwd.up == 0) {
+		smp_ft_strip_trailer(req, clone, req_hdr);
+	}
+
+	return smp_ft_process_local(streamer, req, consumed);
+}
+
+/* Rules for a frame that arrived from a downstream port: it is travelling towards
+ * the host, and the trailer says how far it still has to climb.
+ */
+static int smp_ft_process_upward(struct smp_streamer *streamer, struct net_buf *req,
+				 struct net_buf_simple *clone, struct smp_hdr *req_hdr,
+				 int arrival_port, bool *consumed)
+{
+	struct smp_forward_tree req_fwd = { 0 };
+	struct smp_transport *smpt;
+
+	if ((req_hdr->nh_flags & SMP_HDR_FLAG_FORWARD_TREE) == 0) {
+		/* No return address, so nobody up here asked for this. The forward
+		 * tree only sends up what it knows was requested.
+		 */
+		LOG_WRN("Dropping an unaddressed frame from port %d", arrival_port);
+		return MGMT_ERR_EINVAL;
+	}
+
+	if (smp_ft_read_fwd(clone, &req_fwd)) {
+		LOG_ERR("Frame is flagged as routed but carries no trailer");
+		return MGMT_ERR_ECORRUPT;
+	}
+
+	LOG_DBG("hop: %u, up: %u, port: %d", req_fwd.hop, req_fwd.up, arrival_port);
+
+	if (req_fwd.up == 0 || req_fwd.hop >= SMP_FORWARD_TREE_MAX_HOPS) {
+		LOG_WRN("Dropping a frame with nothing left to retrace");
+		return MGMT_ERR_EINVAL;
+	}
+
+	/* The path is checked against reality at every step up: the nibble for
+	 * this hop must be the port the frame actually came in on. It is what
+	 * stops a device downstream from making up a route through this node.
+	 */
+	if (smp_ft_path_port(&req_fwd, req_fwd.hop) != arrival_port) {
+		LOG_WRN("Path says port %u, frame came in on port %d - dropping",
+			smp_ft_path_port(&req_fwd, req_fwd.hop), arrival_port);
+		return MGMT_ERR_EINVAL;
+	}
+
+	++req_fwd.hop;
+	--req_fwd.up;
+	smp_ft_write_fwd(req, &req_fwd);
+
+	if (req_fwd.up > 0) {
+		/* Still below the frame's origin: pass it on untouched. */
+		smpt = smp_get_smpt(upstream_transport.dev);
+		if (smpt == NULL) {
+			LOG_ERR("No SMP transport bound to the upstream device");
+			return MGMT_ERR_ECORRUPT;
+		}
+
+		LOG_DBG("forward upstream: %s", smpt->dev->name);
+		*consumed = true;
+		/* The transport's output() callback always consumes the buf. */
+		return smpt->functions.output(smpt->dev, req);
+	}
+
+	/* Home. Either this node originated the frame, or the host did and this
+	 * node is the root.
+	 */
+	if (req_hdr->nh_flags & SMP_HDR_FLAG_FT_NODE_ORIGIN) {
+		LOG_DBG("locally originated frame is home");
+		smp_ft_strip_trailer(req, clone, req_hdr);
+		return smp_ft_process_local(streamer, req, consumed);
+	}
+
+	smpt = smp_get_smpt(upstream_transport.dev);
+	if (smpt == NULL) {
+		LOG_ERR("No SMP transport bound to the upstream device");
+		return MGMT_ERR_ECORRUPT;
+	}
+
+	/* The host gets back exactly what it would get from a node with no
+	 * forward tree at all: no trailer, no flags.
+	 */
+	smp_ft_strip_trailer(req, clone, req_hdr);
+
+	LOG_DBG("deliver upstream: %s", smpt->dev->name);
+	*consumed = true;
+	return smpt->functions.output(smpt->dev, req);
+}
+
+/**
+ * Routes one incoming SMP packet.
+ *
+ * The side the frame arrived on selects the rules. A frame from the upstream
+ * transport is heading away from the host: this node either forwards it out the
+ * port the trailer names, or is itself the addressee and processes it locally. A
+ * frame from a downstream port is heading back: this node retraces one hop of the
+ * path in the trailer and either passes it further up, keeps it because it
+ * originated the request, or hands it to the host because it is the root.
+ *
+ * A frame from downstream with no trailer is dropped. The forward tree passes up
+ * only what it can see was asked for.
+ *
  * This function consumes the supplied request buffer regardless of the outcome.
  *
- * The function will return MGMT_ERR_EOK (0) when given an empty input stream,
- * and will also release the buffer from the stream; it does not return
- * MTMT_ERR_ECORRUPT, or any other MGMT error, because there was no error while
- * processing of the input stream, it is callers fault that an empty stream has
- * been passed to the function.
- *
  * @param streamer	The streamer to use for reading, writing, and transmitting.
- * @param req		A buffer containing the request packet.
+ * @param vreq		A buffer containing the request packet.
  *
- * @return 0 on success or when input stream is empty;
- *         MGMT_ERR_ECORRUPT if buffer starts with non SMP data header or there
- *         is not enough bytes to process header, or other MGMT_ERR_[...] code on
- *         failure.
+ * @return 0 on success;
+ *         MGMT_ERR_ECORRUPT if the buffer does not hold one complete SMP frame,
+ *         or another MGMT_ERR_[...] code on failure.
  */
 int smp_ft_process_request_packet(struct smp_streamer *streamer, void *vreq)
 {
 	struct smp_hdr req_hdr = { 0 };
 	struct net_buf_simple clone = { 0 };
-	struct smp_forward_tree req_fwd = { 0 };
 	struct net_buf *req = vreq;
-	struct smp_transport *smpt;
+	int arrival_port;
 	int rc = 0;
 	bool consumed = false;
 
-	LOG_DBG("incomming forward request...");
+	LOG_DBG("incoming forward request...");
 
 	/*
 	 * This clone will copy the size and max length. The pointers will
@@ -191,7 +388,7 @@ int smp_ft_process_request_packet(struct smp_streamer *streamer, void *vreq)
 		rc = smp_read_hdr(&clone, &req_hdr);
 		if (rc != 0) {
 			rc = MGMT_ERR_ECORRUPT;
-			LOG_ERR("Corrupted 1");
+			LOG_ERR("Frame is too short to hold an SMP header");
 			break;
 		}
 
@@ -207,77 +404,22 @@ int smp_ft_process_request_packet(struct smp_streamer *streamer, void *vreq)
 
 		if (clone.len != req_hdr.nh_len) {
 			rc = MGMT_ERR_ECORRUPT;
-			LOG_ERR("Corrupted 2");
+			LOG_ERR("Frame holds %u payload bytes, header says %u",
+				clone.len, req_hdr.nh_len);
 			break;
 		}
 
-		if (req_hdr.nh_flags & SMP_HDR_FLAG_FORWARD_TREE) {
-			LOG_DBG("Processing Forward Tree Protocol");
-			if (smp_ft_read_fwd(&clone, &req_fwd)) {
-				rc = MGMT_ERR_ECORRUPT;
-				LOG_ERR("Corrupted 3");
-				break;
-			}
-
-			LOG_DBG("hops: %02x", req_fwd.hop);
-			for (int i = req_fwd.hop - 1; i >= 0; --i) {
-				uint8_t port = ((req_fwd.port >> (i * SMP_FORWARD_TREE_PORT_BITS))
-						& SMP_FORWARD_TREE_PORT_MASK);
-				LOG_DBG("fwd[%02d]: %02x", i + 1, port);
-			}
-
-			if (req_fwd.hop > 0) {
-				LOG_ERR("forward downstream");
-				/* Before the transport takes the buffer, which
-				 * consumes it either way.
-				 */
-				smp_ft_downstream_forwarded(req_hdr.nh_group, req);
-				rc = smp_ft_forward_downstream(&req_fwd, vreq);
-				consumed = true;
-				break;
-			}
-
-			// Drop forward tree content from payload
-			net_buf_simple_remove_mem(&clone, sizeof(struct smp_forward_tree));
-
-			// Adjust Header
-			req_hdr.nh_flags &= ~SMP_HDR_FLAG_FORWARD_TREE;
-			req_hdr.nh_len -= sizeof(struct smp_forward_tree);
-
-			// Convert back to big-endian for the wire/buffer
-			req_hdr.nh_len = sys_cpu_to_be16(req_hdr.nh_len);
-			req_hdr.nh_group = sys_cpu_to_be16(req_hdr.nh_group);
-
-			// Replace Header
-			net_buf_simple_push_mem(&clone, &req_hdr, sizeof(struct smp_hdr));
-
-			// Sync modified length back to original buffer
-			req->len = clone.len;
-		}
-
+		arrival_port = smp_ft_port_of(streamer->smpt->dev);
 		if (streamer->smpt->dev == upstream_transport.dev) {
-			LOG_DBG("local port: %s", streamer->smpt->dev->name);
-			rc = smp_process_request_packet(streamer, vreq);
-			/* smp_process_request_packet() consumes vreq only on
-			 * success; on error the buf is left to the caller.
-			 */
-			if (rc == 0) {
-				consumed = true;
-			}
+			rc = smp_ft_process_downward(streamer, req, &clone, &req_hdr,
+						     &consumed);
+		} else if (arrival_port >= 0) {
+			rc = smp_ft_process_upward(streamer, req, &clone, &req_hdr,
+						   arrival_port, &consumed);
 		} else {
-			smpt = smp_get_smpt(upstream_transport.dev);
-			if (smpt == NULL) {
-				rc = MGMT_ERR_ECORRUPT;
-				LOG_ERR("Corrupted 4");
-				break;
-			}
-
-			LOG_DBG("forward upstream: %s", smpt->dev->name);
-			rc = smpt->functions.output(smpt->dev, vreq);
-			/* The transport's output() callback always consumes
-			 * the buf (success or failure).
-			 */
-			consumed = true;
+			LOG_ERR("Frame from %s, which is not a port of this node",
+				streamer->smpt->dev->name);
+			rc = MGMT_ERR_EINVAL;
 		}
 	} while (0);
 
