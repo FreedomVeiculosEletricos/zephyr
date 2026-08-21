@@ -135,6 +135,24 @@ config MCUMGR_SMP_SUPPORT_ORIGINAL_PROTOCOL
 	  entry for command error/result codes. The protocol selection is indicated by the request
 	  header sent by the client.
 
+config MCUMGR_SMP_ROUTING_TRAILER_ECHO
+	bool "Echo the routing trailer back in responses"
+	default y
+	help
+	  Copy the eight-byte routing trailer of a request, and the routing bits of its
+	  header flags, into the response, the same way group, sequence number and
+	  command id are already echoed. A device reached through an MCUmgr forward
+	  tree needs this: the trailer is the response's return address, and a node
+	  that gets a response without one has no way to tell whose it is and drops it.
+
+	  This is deliberately not tied to MCUMGR_TRANSPORT_FORWARD_TREE. The device
+	  that has to echo is the leaf, which is precisely the one with no forward tree
+	  of its own and no way of knowing there is a tree above it.
+
+	  Inert wherever no forward tree is in use, since nothing else sets the flag
+	  that turns the echo on. Costs eight bytes of response tailroom while a
+	  request carrying a trailer is being served.
+
 config MCUMGR_SMP_VERBOSE_ERR_RESPONSE
 	bool "Support verbose error response"
 	depends on MCUMGR_SMP_SUPPORT_ORIGINAL_PROTOCOL

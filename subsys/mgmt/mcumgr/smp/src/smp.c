@@ -59,13 +59,72 @@ static void cbor_nb_reader_init(struct cbor_nb_reader *cnr, struct net_buf *nb)
 			       nb->len, 1, NULL, 0);
 }
 
+#if defined(CONFIG_MCUMGR_SMP_ROUTING_TRAILER_ECHO)
+/* Take the routing trailer of a request that carries one, so that the response can
+ * carry it back. The trailer sits at the end of the request payload, which the
+ * caller has yet to consume.
+ */
+static void smp_take_routing_trailer(struct cbor_nb_writer *cnw, const struct smp_hdr *req_hdr,
+				     const struct net_buf *req)
+{
+	const size_t trailer_len = sizeof(cnw->routing_trailer);
+
+	cnw->routing_echo = false;
+
+	if ((req_hdr->nh_flags & SMP_HDR_FLAG_FORWARD_TREE) == 0) {
+		return;
+	}
+
+	if (req_hdr->nh_len < trailer_len || req->len < req_hdr->nh_len) {
+		LOG_WRN("Routing trailer flagged but not present, not echoing");
+		return;
+	}
+
+	memcpy(cnw->routing_trailer, req->data + (req_hdr->nh_len - trailer_len), trailer_len);
+	cnw->routing_echo = true;
+}
+
+/* Append the trailer taken above to a finished response, and account for it in the
+ * length already written to the response header. Both response paths - the handler's
+ * and the error path - end here, because a node upstream drops any response that
+ * arrives without a return address, error responses included.
+ */
+static void smp_append_routing_trailer(struct cbor_nb_writer *cnw)
+{
+	struct smp_hdr *rsp_hdr;
+
+	if (!cnw->routing_echo) {
+		return;
+	}
+
+	rsp_hdr = (struct smp_hdr *)cnw->nb->data;
+	rsp_hdr->nh_len = sys_cpu_to_be16(sys_be16_to_cpu(rsp_hdr->nh_len) +
+					  sizeof(cnw->routing_trailer));
+
+	net_buf_add_mem(cnw->nb, cnw->routing_trailer, sizeof(cnw->routing_trailer));
+}
+#endif
+
 static void cbor_nb_writer_init(struct cbor_nb_writer *cnw, struct net_buf *nb)
 {
+	size_t tailroom;
+
 	net_buf_reset(nb);
 	cnw->nb = nb;
 	cnw->nb->len = sizeof(struct smp_hdr);
+	tailroom = net_buf_tailroom(nb);
+
+#if defined(CONFIG_MCUMGR_SMP_ROUTING_TRAILER_ECHO)
+	/* Held back for smp_append_routing_trailer(). Without this a maximal
+	 * response fills the buffer and leaves the trailer nowhere to go.
+	 */
+	if (cnw->routing_echo) {
+		tailroom -= MIN(tailroom, sizeof(cnw->routing_trailer));
+	}
+#endif
+
 	zcbor_new_encode_state(cnw->zs, ARRAY_SIZE(cnw->zs), nb->data + sizeof(struct smp_hdr),
-			       net_buf_tailroom(nb), 0);
+			       tailroom, 0);
 }
 
 /**
@@ -84,7 +143,14 @@ static void smp_make_rsp_hdr(const struct smp_hdr *req_hdr, struct smp_hdr *rsp_
 {
 	*rsp_hdr = (struct smp_hdr) {
 		.nh_len = sys_cpu_to_be16(len),
+#if defined(CONFIG_MCUMGR_SMP_ROUTING_TRAILER_ECHO)
+		/* Masked rather than copied wholesale, so that a flag defined later
+		 * is not echoed by accident.
+		 */
+		.nh_flags = req_hdr->nh_flags & SMP_HDR_FLAG_ROUTING_MASK,
+#else
 		.nh_flags = 0,
+#endif
 		.nh_op = smp_rsp_op(req_hdr->nh_op),
 		.nh_group = sys_cpu_to_be16(req_hdr->nh_group),
 		.nh_seq = req_hdr->nh_seq,
@@ -358,6 +424,9 @@ static void smp_on_err(struct smp_streamer *streamer, const struct smp_hdr *req_
 	/* Build and transmit the error response. */
 	rc = smp_build_err_rsp(streamer, req_hdr, status, rsn);
 	if (rc == 0) {
+#if defined(CONFIG_MCUMGR_SMP_ROUTING_TRAILER_ECHO)
+		smp_append_routing_trailer(streamer->writer);
+#endif
 #if defined(CONFIG_MCUMGR_TRANSPORT_FORWARD_TREE)
 		streamer->smpt->functions.output(streamer->smpt->dev, rsp);
 #else
@@ -410,6 +479,14 @@ int smp_process_request_packet(struct smp_streamer *streamer, void *vreq)
 
 	rsp = NULL;
 
+#if defined(CONFIG_MCUMGR_SMP_ROUTING_TRAILER_ECHO)
+	/* The writer lives on the caller's stack: say there is nothing to echo
+	 * before any path that can reach smp_on_err() without having read a
+	 * request payload.
+	 */
+	streamer->writer->routing_echo = false;
+#endif
+
 	while (req->len > 0) {
 		handler_found = false;
 		valid_hdr = false;
@@ -430,6 +507,13 @@ int smp_process_request_packet(struct smp_streamer *streamer, void *vreq)
 			break;
 		}
 
+#if defined(CONFIG_MCUMGR_SMP_ROUTING_TRAILER_ECHO)
+		/* Per request, not per packet: in a packet holding several requests
+		 * each one carries its own trailer at the end of its own payload.
+		 */
+		smp_take_routing_trailer(streamer->writer, &req_hdr, req);
+#endif
+
 		if (req_hdr.nh_op == MGMT_OP_READ || req_hdr.nh_op == MGMT_OP_WRITE) {
 			rsp = smp_alloc_rsp(req, streamer->smpt);
 			if (rsp == NULL) {
@@ -448,6 +532,9 @@ int smp_process_request_packet(struct smp_streamer *streamer, void *vreq)
 			}
 
 			/* Send the response. */
+#if defined(CONFIG_MCUMGR_SMP_ROUTING_TRAILER_ECHO)
+			smp_append_routing_trailer(streamer->writer);
+#endif
 #if defined(CONFIG_MCUMGR_TRANSPORT_FORWARD_TREE)
 			rc = streamer->smpt->functions.output(streamer->smpt->dev, rsp);
 #else

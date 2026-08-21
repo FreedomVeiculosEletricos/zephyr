@@ -60,6 +60,18 @@ struct cbor_nb_writer {
 	uint16_t error_group;
 	uint16_t error_ret;
 #endif
+
+#if defined(CONFIG_MCUMGR_SMP_ROUTING_TRAILER_ECHO)
+	/* The request's routing trailer, held while the response is built: the
+	 * request buffer is reused as the response buffer on the error path, so
+	 * the bytes cannot be read back from it later.
+	 */
+	uint8_t routing_trailer[sizeof(uint64_t)];
+	/* Whether routing_trailer holds a trailer to append. Set before the writer
+	 * is initialised, since it decides how much tailroom to leave for it.
+	 */
+	bool routing_echo;
+#endif
 };
 
 /**
