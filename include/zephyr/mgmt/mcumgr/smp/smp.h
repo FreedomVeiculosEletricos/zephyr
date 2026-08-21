@@ -122,10 +122,33 @@ int smp_process_request_packet(struct smp_streamer *streamer, void *req);
 int smp_ft_process_request_packet(struct smp_streamer *streamer, void *vreq);
 
 /**
+ * @brief Sends a locally originated SMP frame down the forward tree.
+ *
+ * Stamps the frame with a routing trailer addressed to @p path and hands it to
+ * the same downstream rules a forwarded request goes through - originating is
+ * forwarding a frame injected here, not a second code path.
+ *
+ * The response finds its way back on its own: each node retraces one hop of the
+ * trailer, and this one recognises the frame as its own and processes it
+ * locally, which under CONFIG_SMP_CLIENT means smp_client_single_response().
+ *
+ * @param path	Ports to take, nearest hop first: path[0] is the port out of this
+ *		node. At most SMP_FORWARD_TREE_MAX_HOPS entries.
+ * @param hops	Number of entries in @p path. Must be at least one; addressing
+ *		this node itself is not what this is for.
+ * @param nb	A complete SMP frame, header included. Consumed either way, as
+ *		with a transport's output().
+ *
+ * @return 0 on success, #mcumgr_err_t code on failure.
+ */
+int smp_ft_originate(const uint8_t *path, uint8_t hops, struct net_buf *nb);
+
+/**
  * @brief Application hook: a frame is about to go out to a downstream transport.
  *
- * Called for every frame this node forwards downstream, before the transport
- * takes it. Purely observational - it is how an application learns that a
+ * Called for every frame this node puts on a downstream port, forwarded or
+ * originated here, before the transport takes it. Purely observational - it is
+ * how an application learns that a
  * downstream link is carrying host traffic, so that something originated locally
  * (a keepalive, say) can keep off a half-duplex wire that is already busy.
  *

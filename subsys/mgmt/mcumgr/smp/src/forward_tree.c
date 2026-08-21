@@ -188,6 +188,52 @@ int smp_ft_forward_downstream(struct smp_forward_tree *req_fwd, void *vreq)
 	return smpt->functions.output(smpt->dev, vreq);
 }
 
+int smp_ft_originate(const uint8_t *path, uint8_t hops, struct net_buf *nb)
+{
+	struct smp_forward_tree fwd = { 0 };
+	struct smp_hdr hdr;
+
+	if (path == NULL || hops == 0 || hops > SMP_FORWARD_TREE_MAX_HOPS) {
+		LOG_ERR("Cannot address %u hops from here", hops);
+		smp_packet_free(nb);
+		return MGMT_ERR_EINVAL;
+	}
+
+	if (nb->len < sizeof(hdr) ||
+	    net_buf_tailroom(nb) < sizeof(struct smp_forward_tree)) {
+		LOG_ERR("Frame has no room for a routing trailer");
+		smp_packet_free(nb);
+		return MGMT_ERR_EMSGSIZE;
+	}
+
+	/* The descent takes the nibbles from the top down, so the caller's first
+	 * hop is the last nibble of the path.
+	 */
+	for (uint8_t i = 0; i < hops; ++i) {
+		fwd.port |= (uint64_t)(path[i] & SMP_FORWARD_TREE_PORT_MASK)
+			    << ((hops - 1 - i) * SMP_FORWARD_TREE_PORT_BITS);
+	}
+
+	fwd.hop = hops;
+	fwd.up = 0;
+
+	memcpy(&hdr, nb->data, sizeof(hdr));
+	hdr.nh_flags |= SMP_HDR_FLAG_FORWARD_TREE | SMP_HDR_FLAG_FT_NODE_ORIGIN;
+	hdr.nh_len = sys_cpu_to_be16(sys_be16_to_cpu(hdr.nh_len) +
+				     sizeof(struct smp_forward_tree));
+	memcpy(nb->data, &hdr, sizeof(hdr));
+
+	net_buf_add(nb, sizeof(struct smp_forward_tree));
+	smp_ft_write_fwd(nb, &fwd);
+
+	/* Same as a forwarded frame from here on, hook included: what the hook
+	 * reports is that the wire is about to be busy, and it is.
+	 */
+	smp_ft_downstream_forwarded(sys_be16_to_cpu(hdr.nh_group), nb);
+
+	return smp_ft_forward_downstream(&fwd, nb);
+}
+
 /* Hand a frame that has arrived at its destination to the local SMP layer.
  *
  * Consumes the buffer only on success; on error it is left to the caller, which
