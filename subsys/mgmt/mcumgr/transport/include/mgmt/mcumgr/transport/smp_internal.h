@@ -39,20 +39,45 @@ struct smp_hdr {
 struct smp_transport;
 struct zephyr_smp_transport;
 
-#if defined(CONFIG_MCUMGR_TRANSPORT_FORWARD_TREE)
+/* Not under CONFIG_MCUMGR_TRANSPORT_FORWARD_TREE: a leaf has no forward tree and
+ * still has to recognise the flags to echo the routing trailer back to the node
+ * that forwarded the request. See CONFIG_MCUMGR_SMP_ROUTING_TRAILER_ECHO.
+ */
 enum smp_hdr_flag {
+	/** A routing trailer is appended after the payload. */
 	SMP_HDR_FLAG_FORWARD_TREE = 0x80,
+	/** The frame was originated by a forward tree node, not by the host. */
+	SMP_HDR_FLAG_FT_NODE_ORIGIN = 0x40,
 } __packed;
 
+/** Header flags a response echoes back; anything else is cleared. */
+#define SMP_HDR_FLAG_ROUTING_MASK					\
+	((uint8_t)(SMP_HDR_FLAG_FORWARD_TREE | SMP_HDR_FLAG_FT_NODE_ORIGIN))
+
+#if defined(CONFIG_MCUMGR_TRANSPORT_FORWARD_TREE)
+/* The trailer is a path plus the position along it. `hop` counts the hops left to
+ * travel and indexes the next port to take; `up` counts the hops already
+ * travelled, so that a response can retrace them. `hop + up` is the path length
+ * and never changes: going down `hop--, up++`, coming back up the reverse. A
+ * frame is home when `up` reaches zero.
+ */
 struct smp_forward_tree {
 #ifdef CONFIG_LITTLE_ENDIAN
-	uint64_t port:60;
+	uint64_t port:56;
+	uint64_t up:4;
 	uint64_t hop:4;
 #else
 	uint64_t hop:4;
-	uint64_t port:60;
+	uint64_t up:4;
+	uint64_t port:56;
 #endif
 } __packed;
+
+BUILD_ASSERT(sizeof(struct smp_forward_tree) == sizeof(uint64_t),
+	     "The routing trailer must stay eight bytes wide");
+
+/** Ports the 56-bit path can hold, one nibble each. */
+#define SMP_FORWARD_TREE_MAX_HOPS 14
 
 struct smp_forward_tree_transport {
 	const struct device *const dev;
