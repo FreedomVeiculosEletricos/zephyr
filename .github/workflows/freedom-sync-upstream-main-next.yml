@@ -4,7 +4,6 @@ on:
   workflow_run:
     workflows: ["Freedom — Sync upstream main"]
     types: [completed]
-    branches: [main]
   workflow_dispatch:
 
 permissions:
