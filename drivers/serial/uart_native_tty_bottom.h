@@ -87,6 +87,19 @@ int native_tty_open_tty_bottom(const char *pathname);
 int native_tty_configure_bottom(int fd, struct native_tty_bottom_cfg *cfg);
 
 /**
+ * @brief Set or clear modem control lines of the tty port.
+ *
+ * @param fd	File descriptor of the tty port.
+ * @param dtr	Change DTR when non-zero.
+ * @param rts	Change RTS when non-zero.
+ * @param set	Assert the selected lines when non-zero, release them otherwise.
+ *
+ * @retval 0	if successful,
+ * @retval -1	otherwise.
+ */
+int native_tty_set_modem_lines_bottom(int fd, int dtr, int rts, int set);
+
+/**
  * @brief Read bottom tty configuration
  *
  * @param fd
