@@ -14,6 +14,10 @@
 #include <poll.h>
 #include <termios.h>
 #include <sys/ioctl.h>
+#include <dirent.h>
+#include <limits.h>
+#include <stdbool.h>
+#include <stdlib.h>
 #include <linux/serial.h>
 #include <unistd.h>
 
@@ -399,4 +403,98 @@ int native_tty_set_low_latency_bottom(int fd)
 	}
 
 	return 0;
+}
+
+/* Reads a hexadecimal sysfs attribute such as idVendor. */
+static int native_tty_read_hex(const char *dir, const char *name, long *value)
+{
+	char path[PATH_MAX];
+	char text[16];
+	char *end;
+	FILE *file;
+	int rc = 0;
+
+	snprintf(path, sizeof(path), "%s/%s", dir, name);
+	file = fopen(path, "r");
+	if (file == NULL) {
+		return -nsi_errno_to_mid(errno);
+	}
+
+	if (fgets(text, sizeof(text), file) == NULL) {
+		rc = -NSI_ERRNO_MID_EIO;
+	} else {
+		*value = strtol(text, &end, 16);
+		if (end == text) {
+			rc = -NSI_ERRNO_MID_EINVAL;
+		}
+	}
+
+	fclose(file);
+
+	return rc;
+}
+
+/* Whether the USB device a tty belongs to, the nearest ancestor with an idVendor, matches. */
+static bool native_tty_usb_matches(const char *tty_class, const char *name, uint32_t vendor,
+				   uint32_t product)
+{
+	char link[PATH_MAX];
+	char dir[PATH_MAX];
+	char *slash;
+	long found_vendor;
+	long found_product;
+
+	snprintf(link, sizeof(link), "%s/%s/device", tty_class, name);
+	if (realpath(link, dir) == NULL) {
+		return false;
+	}
+
+	while ((slash = strrchr(dir, '/')) != NULL && slash != dir) {
+		if (native_tty_read_hex(dir, "idVendor", &found_vendor) == 0) {
+			return found_vendor == vendor &&
+			       native_tty_read_hex(dir, "idProduct", &found_product) == 0 &&
+			       found_product == product;
+		}
+		*slash = '\0';
+	}
+
+	return false;
+}
+
+int native_tty_find_usb_bottom(const char *tty_class, const uint32_t *ids, int pairs, char *path,
+			       size_t size)
+{
+	char best[NAME_MAX + 1];
+	struct dirent *entry;
+	DIR *ttys;
+	int length;
+
+	for (int i = 0; i < pairs; i++) {
+		ttys = opendir(tty_class);
+		if (ttys == NULL) {
+			return -nsi_errno_to_mid(errno);
+		}
+
+		best[0] = '\0';
+		while ((entry = readdir(ttys)) != NULL) {
+			if (entry->d_name[0] != '.' &&
+			    (best[0] == '\0' || strcmp(entry->d_name, best) < 0) &&
+			    native_tty_usb_matches(tty_class, entry->d_name, ids[2 * i],
+						   ids[2 * i + 1])) {
+				snprintf(best, sizeof(best), "%s", entry->d_name);
+			}
+		}
+		closedir(ttys);
+
+		if (best[0] != '\0') {
+			length = snprintf(path, size, "/dev/%s", best);
+			if (length < 0 || (size_t)length >= size) {
+				return -NSI_ERRNO_MID_ENAMETOOLONG;
+			}
+
+			return 0;
+		}
+	}
+
+	return -NSI_ERRNO_MID_ENODEV;
 }
