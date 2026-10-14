@@ -100,6 +100,19 @@ int native_tty_configure_bottom(int fd, struct native_tty_bottom_cfg *cfg);
 int native_tty_set_modem_lines_bottom(int fd, int dtr, int rts, int set);
 
 /**
+ * @brief Ask the tty driver to deliver received data with the lowest latency.
+ *
+ * USB serial adapters otherwise hold a partial packet until a latency timer
+ * expires, 16 ms on FTDI chips.
+ *
+ * @param fd	File descriptor of the tty port.
+ *
+ * @retval 0	if successful,
+ * @retval -1	otherwise.
+ */
+int native_tty_set_low_latency_bottom(int fd);
+
+/**
  * @brief Read bottom tty configuration
  *
  * @param fd
