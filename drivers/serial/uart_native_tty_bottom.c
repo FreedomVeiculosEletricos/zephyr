@@ -263,8 +263,21 @@ static inline void native_tty_data_bits_get(const struct termios *ter,
 int native_tty_poll_bottom(int fd)
 {
 	struct pollfd pfd = { .fd = fd, .events = POLLIN };
+	int rc = poll(&pfd, 1, 0);
 
-	return poll(&pfd, 1, 0);
+	if (rc < 0) {
+		return -nsi_errno_to_mid(errno);
+	}
+
+	/* poll() reports a hung-up port as ready, but every read then fails. */
+	if (pfd.revents & POLLNVAL) {
+		return -NSI_ERRNO_MID_EBADF;
+	}
+	if (pfd.revents & (POLLHUP | POLLERR)) {
+		return -NSI_ERRNO_MID_EIO;
+	}
+
+	return rc;
 }
 
 int native_tty_open_tty_bottom(const char *pathname)
