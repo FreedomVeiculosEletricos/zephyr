@@ -100,6 +100,19 @@ int native_tty_configure_bottom(int fd, struct native_tty_bottom_cfg *cfg);
 int native_tty_set_modem_lines_bottom(int fd, int dtr, int rts, int set);
 
 /**
+ * @brief Ask the tty driver to deliver received data with the lowest latency.
+ *
+ * USB serial adapters otherwise hold a partial packet until a latency timer
+ * expires.
+ *
+ * @param fd	File descriptor of the tty port.
+ *
+ * @retval 0	if successful,
+ * @retval <0	the host's errno of the failed ioctl, negated, as an NSI_ERRNO_MID_* value.
+ */
+int native_tty_set_low_latency_bottom(int fd);
+
+/**
  * @brief Read bottom tty configuration
  *
  * @param fd

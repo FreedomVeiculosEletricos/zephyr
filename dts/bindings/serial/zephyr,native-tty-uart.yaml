@@ -11,6 +11,12 @@ properties:
     description: |
       Full path to the serial port device, such as "/dev/ttyUSB0" or
       "/dev/ttyACM0".
+  low-latency:
+    type: boolean
+    description: |
+      Ask the host tty driver for the lowest receive latency. USB serial
+      adapters otherwise hold a partial packet until a latency timer expires,
+      which delays protocols that wait for each byte's echo.
   current-speed:
     description: |
       Initial baud rate setting for UART. Only a fixed set of baud rates are
