@@ -14,6 +14,7 @@
 #include <poll.h>
 #include <termios.h>
 #include <sys/ioctl.h>
+#include <linux/serial.h>
 #include <unistd.h>
 
 #include <nsi_errno.h>
@@ -365,4 +366,15 @@ int native_tty_set_modem_lines_bottom(int fd, int dtr, int rts, int set)
 	int lines = (dtr ? TIOCM_DTR : 0) | (rts ? TIOCM_RTS : 0);
 
 	return ioctl(fd, set ? TIOCMBIS : TIOCMBIC, &lines) ? -1 : 0;
+}
+
+int native_tty_set_low_latency_bottom(int fd)
+{
+	struct serial_struct serial;
+
+	if (ioctl(fd, TIOCGSERIAL, &serial)) {
+		return -1;
+	}
+	serial.flags |= ASYNC_LOW_LATENCY;
+	return ioctl(fd, TIOCSSERIAL, &serial) ? -1 : 0;
 }

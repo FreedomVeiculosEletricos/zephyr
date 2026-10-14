@@ -58,6 +58,7 @@ struct native_tty_data {
 
 struct native_tty_config {
 	struct uart_config uart_config;
+	bool low_latency;
 };
 
 #ifdef CONFIG_UART_INTERRUPT_DRIVEN
@@ -437,6 +438,11 @@ static int native_tty_serial_init(const struct device *dev)
 		ERROR("%s: could not configure serial port %s\n", dev->name, data->serial_port);
 	}
 
+	if (((struct native_tty_config *)dev->config)->low_latency &&
+	    native_tty_set_low_latency_bottom(data->fd)) {
+		WARN("%s: could not set low latency on %s\n", dev->name, data->serial_port);
+	}
+
 	posix_print_trace("%s connected to the serial port: %s\n", dev->name, data->serial_port);
 
 #ifdef CONFIG_UART_INTERRUPT_DRIVEN
@@ -497,6 +503,7 @@ static DEVICE_API(uart, native_tty_uart_driver_api) = {
 				.stop_bits = UART_CFG_STOP_BITS_1,                                 \
 				.baudrate = DT_INST_PROP(inst, current_speed),                     \
 			},                                                                         \
+		.low_latency = DT_INST_PROP(inst, low_latency),                                    \
 	};                                                                                         \
                                                                                                    \
 	static struct native_tty_data native_tty_##inst##_data = {                                 \
