@@ -11,6 +11,19 @@ properties:
     description: |
       Full path to the serial port device, such as "/dev/ttyUSB0" or
       "/dev/ttyACM0".
+  usb-ids:
+    type: array
+    description: |
+      Vendor and product ID pairs of USB serial adapters, such as
+      <0x0403 0x6001>, tried in order when neither serial-port nor the
+      command line names the port. The first host tty whose USB device
+      matches is opened; the application exits if none does.
+  low-latency:
+    type: boolean
+    description: |
+      Ask the host tty driver for the lowest receive latency. USB serial
+      adapters otherwise hold a partial packet for a latency timer, 16 ms on
+      FTDI chips, which delays protocols that wait for each byte's echo.
   current-speed:
     description: |
       Initial baud rate setting for UART. Only a fixed set of baud rates are

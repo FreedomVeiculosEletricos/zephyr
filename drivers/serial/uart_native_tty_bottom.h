@@ -15,6 +15,7 @@
 extern "C" {
 #endif
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* Below enums are just differently namespaced copies of uart_config_* enums. Options that are not
@@ -60,7 +61,7 @@ struct native_tty_bottom_cfg {
  *
  * @retval 1 if data is available
  * @retval 0 if data is not available
- * @retval <0 on error
+ * @retval <0 on error, or if the port hung up
  */
 int native_tty_poll_bottom(int fd);
 
@@ -85,6 +86,50 @@ int native_tty_open_tty_bottom(const char *pathname);
  * @retval -1	otherwise.
  */
 int native_tty_configure_bottom(int fd, struct native_tty_bottom_cfg *cfg);
+
+/**
+ * @brief Set or clear modem control lines of the tty port.
+ *
+ * @param fd	File descriptor of the tty port.
+ * @param dtr	Change DTR when non-zero.
+ * @param rts	Change RTS when non-zero.
+ * @param set	Assert the selected lines when non-zero, release them otherwise.
+ *
+ * @retval 0	if successful,
+ * @retval -1	otherwise.
+ */
+int native_tty_set_modem_lines_bottom(int fd, int dtr, int rts, int set);
+
+/**
+ * @brief Ask the tty driver to deliver received data with the lowest latency.
+ *
+ * USB serial adapters otherwise hold a partial packet until a latency timer
+ * expires, 16 ms on FTDI chips.
+ *
+ * @param fd	File descriptor of the tty port.
+ *
+ * @retval 0	if successful,
+ * @retval -1	otherwise.
+ */
+int native_tty_set_low_latency_bottom(int fd);
+
+/**
+ * @brief Find the tty of a USB serial adapter by vendor and product ID.
+ *
+ * Tries the pairs in order and returns the first tty under @p tty_class whose
+ * USB device matches one; among ttys of the same pair, the lowest name wins.
+ *
+ * @param tty_class	Directory listing the ttys, normally "/sys/class/tty".
+ * @param ids		Vendor and product ID pairs.
+ * @param pairs		Number of pairs in @p ids.
+ * @param path		Receives "/dev/" and the tty name.
+ * @param size		Size of @p path.
+ *
+ * @retval 0	if a tty was found,
+ * @retval -1	otherwise.
+ */
+int native_tty_find_usb_bottom(const char *tty_class, const uint32_t *ids, int pairs, char *path,
+			       size_t size);
 
 /**
  * @brief Read bottom tty configuration

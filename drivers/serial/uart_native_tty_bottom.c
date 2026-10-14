@@ -13,6 +13,11 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <termios.h>
+#include <sys/ioctl.h>
+#include <dirent.h>
+#include <limits.h>
+#include <stdlib.h>
+#include <linux/serial.h>
 #include <unistd.h>
 
 #include <nsi_errno.h>
@@ -261,8 +266,14 @@ static inline void native_tty_data_bits_get(const struct termios *ter,
 int native_tty_poll_bottom(int fd)
 {
 	struct pollfd pfd = { .fd = fd, .events = POLLIN };
+	int rc = poll(&pfd, 1, 0);
 
-	return poll(&pfd, 1, 0);
+	/* poll() reports a hung-up port as ready, but every read then fails. */
+	if (rc > 0 && (pfd.revents & (POLLHUP | POLLERR | POLLNVAL))) {
+		return -1;
+	}
+
+	return rc;
 }
 
 int native_tty_open_tty_bottom(const char *pathname)
@@ -357,4 +368,94 @@ int native_tty_read_bottom_cfg(int fd, struct native_tty_bottom_cfg *cfg)
 	cfg->flow_ctrl = NTB_FLOW_CTRL_NONE;
 
 	return 0;
+}
+
+int native_tty_set_modem_lines_bottom(int fd, int dtr, int rts, int set)
+{
+	int lines = (dtr ? TIOCM_DTR : 0) | (rts ? TIOCM_RTS : 0);
+
+	return ioctl(fd, set ? TIOCMBIS : TIOCMBIC, &lines) ? -1 : 0;
+}
+
+int native_tty_set_low_latency_bottom(int fd)
+{
+	struct serial_struct serial;
+
+	if (ioctl(fd, TIOCGSERIAL, &serial)) {
+		return -1;
+	}
+	serial.flags |= ASYNC_LOW_LATENCY;
+	return ioctl(fd, TIOCSSERIAL, &serial) ? -1 : 0;
+}
+
+/* Reads a hexadecimal sysfs attribute such as idVendor; -1 if it is missing. */
+static long native_tty_read_hex(const char *dir, const char *name)
+{
+	char path[PATH_MAX];
+	char text[16];
+	FILE *file;
+	long value = -1;
+
+	snprintf(path, sizeof(path), "%s/%s", dir, name);
+	file = fopen(path, "r");
+	if (file == NULL) {
+		return -1;
+	}
+	if (fgets(text, sizeof(text), file) != NULL) {
+		value = strtol(text, NULL, 16);
+	}
+	fclose(file);
+	return value;
+}
+
+/* Whether the USB device a tty belongs to, the nearest ancestor with an idVendor, matches. */
+static int native_tty_usb_matches(const char *tty_class, const char *name, uint32_t vendor,
+				  uint32_t product)
+{
+	char link[PATH_MAX];
+	char dir[PATH_MAX];
+	char *slash;
+
+	snprintf(link, sizeof(link), "%s/%s/device", tty_class, name);
+	if (realpath(link, dir) == NULL) {
+		return 0;
+	}
+	while ((slash = strrchr(dir, '/')) != NULL && slash != dir) {
+		long found = native_tty_read_hex(dir, "idVendor");
+
+		if (found >= 0) {
+			return found == vendor && native_tty_read_hex(dir, "idProduct") == product;
+		}
+		*slash = '\0';
+	}
+	return 0;
+}
+
+int native_tty_find_usb_bottom(const char *tty_class, const uint32_t *ids, int pairs, char *path,
+			       size_t size)
+{
+	for (int i = 0; i < pairs; i++) {
+		char best[NAME_MAX + 1] = "";
+		struct dirent *entry;
+		DIR *ttys = opendir(tty_class);
+
+		if (ttys == NULL) {
+			return -1;
+		}
+		while ((entry = readdir(ttys)) != NULL) {
+			if (entry->d_name[0] != '.' &&
+			    (best[0] == '\0' || strcmp(entry->d_name, best) < 0) &&
+			    native_tty_usb_matches(tty_class, entry->d_name, ids[2 * i],
+						   ids[2 * i + 1])) {
+				snprintf(best, sizeof(best), "%s", entry->d_name);
+			}
+		}
+		closedir(ttys);
+		if (best[0] != '\0') {
+			int length = snprintf(path, size, "/dev/%s", best);
+
+			return length >= 0 && (size_t)length < size ? 0 : -1;
+		}
+	}
+	return -1;
 }
