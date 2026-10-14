@@ -446,12 +446,31 @@ static int native_tty_serial_init(const struct device *dev)
 	return 0;
 }
 
+#ifdef CONFIG_UART_LINE_CTRL
+static int native_tty_line_ctrl_set(const struct device *dev, uint32_t ctrl, uint32_t val)
+{
+	struct native_tty_data *data = dev->data;
+
+	if (ctrl != UART_LINE_CTRL_DTR && ctrl != UART_LINE_CTRL_RTS) {
+		return -ENOTSUP;
+	}
+	if (native_tty_set_modem_lines_bottom(data->fd, ctrl == UART_LINE_CTRL_DTR,
+					      ctrl == UART_LINE_CTRL_RTS, val != 0)) {
+		return -EIO;
+	}
+	return 0;
+}
+#endif /* CONFIG_UART_LINE_CTRL */
+
 static DEVICE_API(uart, native_tty_uart_driver_api) = {
 	.poll_out = native_tty_uart_poll_out,
 	.poll_in = native_tty_uart_poll_in,
 #ifdef CONFIG_UART_USE_RUNTIME_CONFIGURE
 	.configure = native_tty_configure,
 	.config_get = native_tty_config_get,
+#endif
+#ifdef CONFIG_UART_LINE_CTRL
+	.line_ctrl_set = native_tty_line_ctrl_set,
 #endif
 #ifdef CONFIG_UART_INTERRUPT_DRIVEN
 	.fifo_fill        = native_tty_uart_fifo_fill,
