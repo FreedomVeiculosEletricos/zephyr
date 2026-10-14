@@ -60,7 +60,9 @@ struct native_tty_bottom_cfg {
  *
  * @retval 1 if data is available
  * @retval 0 if data is not available
- * @retval <0 on error
+ * @retval -NSI_ERRNO_MID_EIO if the port hung up or failed
+ * @retval -NSI_ERRNO_MID_EBADF if @p fd is not an open file
+ * @retval <0 the host's errno of a failed poll(), negated, as an NSI_ERRNO_MID_* value
  */
 int native_tty_poll_bottom(int fd);
 
