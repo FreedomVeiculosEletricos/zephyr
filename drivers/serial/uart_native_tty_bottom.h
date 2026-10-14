@@ -15,6 +15,7 @@
 extern "C" {
 #endif
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* Below enums are just differently namespaced copies of uart_config_* enums. Options that are not
@@ -111,6 +112,24 @@ int native_tty_set_modem_lines_bottom(int fd, int dtr, int rts, int set);
  * @retval -1	otherwise.
  */
 int native_tty_set_low_latency_bottom(int fd);
+
+/**
+ * @brief Find the tty of a USB serial adapter by vendor and product ID.
+ *
+ * Tries the pairs in order and returns the first tty under @p tty_class whose
+ * USB device matches one; among ttys of the same pair, the lowest name wins.
+ *
+ * @param tty_class	Directory listing the ttys, normally "/sys/class/tty".
+ * @param ids		Vendor and product ID pairs.
+ * @param pairs		Number of pairs in @p ids.
+ * @param path		Receives "/dev/" and the tty name.
+ * @param size		Size of @p path.
+ *
+ * @retval 0	if a tty was found,
+ * @retval -1	otherwise.
+ */
+int native_tty_find_usb_bottom(const char *tty_class, const uint32_t *ids, int pairs, char *path,
+			       size_t size);
 
 /**
  * @brief Read bottom tty configuration
