@@ -364,7 +364,8 @@ void native_tty_uart_irq_function(void *arg1, void *arg2, void *arg3)
 			if (ret == 1) {
 				native_tty_uart_irq_handler(dev);
 			} else if (ret < 0) {
-				WARN("Poll returned error %d\n", ret);
+				ERROR("%s: serial port %s hung up or failed\n", dev->name,
+				      data->serial_port);
 			} else {
 				k_sleep(K_MSEC(1));
 			}

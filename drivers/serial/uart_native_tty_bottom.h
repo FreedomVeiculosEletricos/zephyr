@@ -60,7 +60,7 @@ struct native_tty_bottom_cfg {
  *
  * @retval 1 if data is available
  * @retval 0 if data is not available
- * @retval <0 on error
+ * @retval <0 on error, or if the port hung up
  */
 int native_tty_poll_bottom(int fd);
 
